@@ -1,12 +1,16 @@
-import json
+import logging
 import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
+
+import events
+from memory import SessionMemory
 
 load_dotenv()
 
@@ -20,6 +24,15 @@ llm = ChatOpenAI(
     api_key=API_KEY,
     max_completion_tokens=2048,
 )
+
+SYSTEM_PROMPT = (
+    "You are Hyperion, an AI assistant designed to help deploy and manage applications "
+    "across the Cloud-Edge-IoT computing continuum. You live inside the HyperAI IDE. "
+    "Answer clearly and briefly."
+)
+
+log = logging.getLogger("hyperion")
+memory = SessionMemory()
 
 app = FastAPI(title="Hyperion Agent")
 
@@ -37,10 +50,26 @@ class ChatRequest(BaseModel):
 
 
 async def generate_reply(request: ChatRequest):
-    async for chunk in llm.astream(request.text):
-        if chunk.text:
-            yield f"data: {json.dumps({'response': chunk.text})}\n\n"
-    yield "data: [DONE]\n\n"
+    messages = [
+        SystemMessage(SYSTEM_PROMPT),
+        *memory.history(request.user_id),
+        HumanMessage(request.text),
+    ]
+
+    reply = ""
+    try:
+        async for chunk in llm.astream(messages):
+            if chunk.text:
+                reply += chunk.text
+                yield events.text(chunk.text)
+    except Exception:
+        log.exception("LLM request failed")
+        yield events.text("Sorry, I can't reach the language model right now. Please try again.")
+    else:
+        # Save completed turn
+        memory.add_turn(request.user_id, request.text, reply)
+
+    yield events.done()
 
 
 @app.post("/chat")

@@ -6,7 +6,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 RUN uv sync --no-dev
 
-COPY main.py helpers.py ./
+COPY *.py ./
 
 ENV IDE_BACKEND_URL=http://host.docker.internal:3001/api
 
