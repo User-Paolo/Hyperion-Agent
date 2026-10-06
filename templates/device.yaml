@@ -1,0 +1,43 @@
+apiVersion: hyper.ai/v1
+kind: Application
+metadata:
+  name: hello-world
+  annotations:
+    intent: "Hello World test"
+    domain: "edge-testing"
+spec:
+  app:
+    type: device
+    schemaVersion: "1.0.0"
+    name: "hello-world"
+    version: "1.0.0"
+    description: "Hello World Docker image for basic connectivity testing."
+    owner: "HyperAI Team"
+    lifecyclePhase: "testing"
+  workload:
+    kind: DockerImage
+    dockerImage:
+      image: "hello-world"
+      imagePullPolicy: "IfNotPresent"
+  exec:
+    parameters:
+      MODE: "test"
+  network:
+    ports:
+      - port: 80
+        protocol: "HTTP"
+    networkBandwidthMin: { value: 1, unit: "Mbps" }
+  qos:
+    latencyToleranceMax: { value: 500, unit: "ms" }
+    energyCost: { value: 1, unit: "W" }
+    monetaryCost: { value: 0.01, currency: "USD", per: "hour" }
+    resilience: "auto-restart"
+    availability: { value: 0.90, unit: "fraction" }
+    startupTime: { value: 5, unit: "s" }
+  constraints:
+    schedulingPriority: 1
+    supportedArchitectures: ["amd64", "arm64"]
+    geoLocationRequirement: "LocalZone"
+    isHighlyAvailable: false
+    faultTolerance: "graceful-degradation"
+    dataClassification: "internal"

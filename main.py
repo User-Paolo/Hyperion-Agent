@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
+import actions
 import events
 import router
 from memory import SessionMemory
@@ -26,9 +27,9 @@ llm = ChatOpenAI(
     max_completion_tokens=2048,
 )
 
-router_llm = router.build(
-    ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0)
-)
+precise_llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0)
+router_llm = router.build(precise_llm)
+planner_llm = actions.build_planner(precise_llm)
 
 SYSTEM_PROMPT = (
     "You are Hyperion, an AI assistant designed to help deploy and manage applications "
@@ -45,11 +46,6 @@ OFF_TOPIC_REPLY = (
 )
 
 OFF_TOPIC_PLACEHOLDER = "(an off-topic message that was declined)"
-
-ACTIONS_PENDING_REPLY = (
-    "I understood that as a request to change your workspace, but file actions are not "
-    "available yet. You can still ask me questions about HYPER-AI."
-)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("hyperion")
@@ -91,8 +87,9 @@ async def generate_reply(request: ChatRequest):
             reply = OFF_TOPIC_REPLY
             yield events.text(reply)
         elif route == "ide_action":
-            reply = ACTIONS_PENDING_REPLY
-            yield events.text(reply)
+            async for payload in actions.run(planner_llm, precise_llm, request.text, history):
+                reply += payload.get("response", "")
+                yield events.encode(payload)
         else:
             messages = [SystemMessage(SYSTEM_PROMPT), *history, HumanMessage(request.text)]
             async for chunk in llm.astream(messages):

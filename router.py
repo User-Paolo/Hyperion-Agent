@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -15,6 +16,7 @@ ide_action - the user wants something done to the workspace: create, write, gene
   edit, change, fix, rename, open, show, read, validate or delete a file, folder, YAML or
   app profile. Also a yes/no reply to a question Hyperion just asked about such a change.
   Asking to write or generate a profile or YAML is ALWAYS ide_action.
+  Asking what is inside, or about the content of, a named file is ide_action.
   It needs a file, folder, YAML or profile; changing plain text is not ide_action.
 hyperai_question - a question asking for information about the HYPER-AI project, the HyperAI
   IDE, app profiles, YAML, deployment, Kubernetes, containers, edge, IoT or cloud computing.
@@ -43,6 +45,8 @@ Can you explain that in more detail? (after an answer about HYPER-AI) -> hyperai
 # Router context size
 CONTEXT_MESSAGES = 2
 
+FILE_NAME = re.compile(r"[\w./-]+\.(ya?ml|json|md|txt)\b", re.I)
+
 
 class Decision(BaseModel):
     route: Route
@@ -62,4 +66,8 @@ async def classify(router_llm, text: str, history: list[BaseMessage]) -> Route:
         prompt = f"Conversation so far:\n{context}\n\n{prompt}"
 
     decision = await router_llm.ainvoke([SystemMessage(ROUTER_PROMPT), HumanMessage(prompt)])
+
+    # Named files mean a workspace action
+    if decision.route in ("hyperai_question", "chit_chat") and FILE_NAME.search(text):
+        return "ide_action"
     return decision.route
