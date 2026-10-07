@@ -131,6 +131,11 @@ DEVICE_WORDS = (
     "glasses",
 )
 
+YES_WORDS = re.compile(r"^(yes|y|yeah|yep|sure|ok|okay|confirm(ed)?|go ahead|do it|proceed)\b")
+NO_WORDS = re.compile(r"^(no|n|nope|cancel|stop|keep|don'?t|do not)\b")
+
+TYPED_PATH = re.compile(r"[\w./-]+\.(?:ya?ml|json|md|txt)\b", re.I)
+
 SEVERAL_WORDS = re.compile(r"\b(and|also|then|plus)\b|,", re.I)
 
 REFERENCE_WORDS = re.compile(r"\b(it|its|that|this|them|those|these)\b", re.I)
@@ -193,7 +198,9 @@ def extract_block(text: str) -> str:
     return body.strip() + "\n"
 
 
-async def plan(planner_llm, text: str, history: list[BaseMessage]) -> list[Step]:
+async def plan(
+    planner_llm, text: str, history: list[BaseMessage], touched: list[str]
+) -> list[Step]:
     context = "\n".join(
         f"{'User' if m.type == 'human' else 'Hyperion'}: {m.content[:300]}"
         for m in history[-CONTEXT_MESSAGES:]
@@ -201,6 +208,8 @@ async def plan(planner_llm, text: str, history: list[BaseMessage]) -> list[Step]
     prompt = f'Request:\n"""\n{text}\n"""'
     if context:
         prompt = f"Conversation so far:\n{context}\n\n{prompt}"
+    if touched:
+        prompt = f"Files used recently, newest last: {', '.join(touched)}\n\n{prompt}"
     result = await planner_llm.ainvoke([SystemMessage(PLANNER_PROMPT), HumanMessage(prompt)])
     steps = result.steps[:MAX_STEPS]
 
@@ -208,6 +217,16 @@ async def plan(planner_llm, text: str, history: list[BaseMessage]) -> list[Step]
     written = {s.path for s in steps if s.operation in ("create_file", "edit_file")}
     steps = [s for s in steps if not (s.operation == "read_file" and s.path in written)]
     steps = [s for s in steps if refers_to(s, text)]
+
+    # Paths the user typed win
+    typed = TYPED_PATH.findall(text)
+    for step in steps:
+        if step.operation in ("create_file", "create_folder", "none") or step.path in text:
+            continue
+        name = posixpath.basename(step.path)
+        same = [t for t in typed if posixpath.basename(t) == name]
+        if same:
+            step.path = same[0]
 
     # One step unless asked for more
     if not SEVERAL_WORDS.search(text):
@@ -339,7 +358,7 @@ def format_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-async def run_step(llm, step: Step, user_text: str):
+async def run_step(llm, step: Step, user_text: str, pending: list[dict], touch):
     op = step.operation
     path = safe_path(step.path)
     if op != "none" and not path:
@@ -351,23 +370,29 @@ async def run_step(llm, step: Step, user_text: str):
         yield say(f"Created the folder `{path}`.\n")
 
     elif op == "delete_folder":
-        yield act("delete_folder", path=path)
-        yield say(f"Deleted the folder `{path}`.\n")
+        pending.append({"operation": "delete_folder", "path": path})
 
     elif op == "delete_file":
-        yield act("delete_file", path=path)
-        yield say(f"Deleted `{path}`.\n")
+        try:
+            found = await lookup(path)
+        except ReadFileError as exc:
+            yield say(f"I couldn't find `{path}`: {exc}.\n")
+            return
+        if not found:
+            yield say(f"I couldn't find `{path}`: it is not in the workspace.\n")
+            return
+        pending.append({"operation": "delete_file", "path": found["path"]})
 
     elif op == "create_file":
         if await exists_at(path):
-            yield say(
-                f"`{path}` already exists, so I left it unchanged. "
-                "Ask me to edit it, or give the new file another name.\n"
-            )
+            yield say(f"`{path}` already exists. Writing a new version for you to confirm...\n")
+            content = await write_new(llm, path, user_text, step)
+            pending.append({"operation": "overwrite", "path": path, "content": content})
             return
         yield say(f"Writing `{path}`...\n")
         content = await write_new(llm, path, user_text, step)
         yield act("create_file", path=path, content=content)
+        touch(path)
         kind = content_kind(content)
         label = f" as a {kind} app profile" if kind != "other" else ""
         yield say(f"Created `{path}`{label}. It is open in the editor.\n")
@@ -388,6 +413,7 @@ async def run_step(llm, step: Step, user_text: str):
         yield say(f"Updating `{path}`...\n")
         updated = await write_edit(llm, path, content, user_text, step)
         yield act("edit_file", path=path, content=updated)
+        touch(path)
         yield say(f"Updated `{path}`. It is open in the editor.\n")
         if content_kind(updated) != "other":
             async for payload in check_and_fix(llm, path, updated):
@@ -399,6 +425,7 @@ async def run_step(llm, step: Step, user_text: str):
         except ReadFileError as exc:
             yield say(f"I couldn't open `{path}`: {exc}.\n")
             return
+        touch(path)
         shown = content[:MAX_SHOWN_CHARS]
         more = "\n(truncated)" if len(content) > MAX_SHOWN_CHARS else ""
         yield say(f"Contents of `{path}`:\n```\n{shown}```{more}\n")
@@ -409,6 +436,7 @@ async def run_step(llm, step: Step, user_text: str):
         except ValidateFileError as exc:
             yield say(f"I couldn't validate `{path}`: {exc}.\n")
             return
+        touch(report.get("path") or path)
         yield say(format_report(report) + "\n")
 
     else:
@@ -418,14 +446,66 @@ async def run_step(llm, step: Step, user_text: str):
         )
 
 
-async def run(planner_llm, llm, text: str, history: list[BaseMessage]):
+async def run(planner_llm, llm, text: str, history: list[BaseMessage], memory, user_id: str):
     # Refuse paths outside the workspace
     if OUTSIDE_PATH.search(text):
         yield say("I can only work with paths inside the workspace, so I left everything unchanged.\n")
         return
-    steps = await plan(planner_llm, text, history)
+
+    def touch(path: str) -> None:
+        memory.touch(user_id, path)
+
+    steps = await plan(planner_llm, text, history, memory.touched(user_id))
     if not steps:
         steps = [Step(operation="none", path="", request=text)]
+
+    pending: list[dict] = []
     for step in steps:
-        async for event in run_step(llm, step, text):
+        async for event in run_step(llm, step, text, pending, touch):
             yield event
+
+    # Destructive steps wait for a yes
+    if pending:
+        memory.set_pending(user_id, pending)
+        yield say(question(pending))
+
+
+def describe(item: dict) -> str:
+    path = item["path"]
+    if item["operation"] == "delete_folder":
+        return f"delete the folder `{path}` and everything in it"
+    if item["operation"] == "overwrite":
+        return f"replace `{path}` with the new version"
+    return f"delete `{path}`"
+
+
+def question(items: list[dict]) -> str:
+    if len(items) == 1:
+        return f"Please confirm: {describe(items[0])}? Reply yes or no.\n"
+    listed = "\n".join(f"- {describe(item)}" for item in items)
+    return f"Please confirm these changes:\n{listed}\nReply yes or no.\n"
+
+
+def answer(text: str) -> str | None:
+    reply = text.strip().lower()
+    if NO_WORDS.match(reply):
+        return "no"
+    if YES_WORDS.match(reply):
+        return "yes"
+    return None
+
+
+async def confirm(llm, items: list[dict], memory, user_id: str):
+    for item in items:
+        op, path = item["operation"], item["path"]
+        if op == "overwrite":
+            yield act("edit_file", path=path, content=item["content"])
+            yield say(f"Replaced `{path}` with the new version. It is open in the editor.\n")
+            if content_kind(item["content"]) != "other":
+                async for payload in check_and_fix(llm, path, item["content"]):
+                    yield payload
+        else:
+            yield act(op, path=path)
+            label = "the folder " if op == "delete_folder" else ""
+            yield say(f"Deleted {label}`{path}`.\n")
+        memory.touch(user_id, path)

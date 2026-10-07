@@ -47,6 +47,10 @@ OFF_TOPIC_REPLY = (
 
 OFF_TOPIC_PLACEHOLDER = "(an off-topic message that was declined)"
 
+CANCELLED_REPLY = "Okay, I cancelled it and left your files unchanged.\n"
+
+PENDING_DROPPED_REPLY = "I cancelled the change that was waiting for your confirmation.\n"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("hyperion")
 memory = SessionMemory()
@@ -78,31 +82,50 @@ async def route_message(request: ChatRequest, history) -> router.Route:
 
 
 async def generate_reply(request: ChatRequest):
-    history = memory.history(request.user_id)
-    route = await route_message(request, history)
+    user_id = request.user_id
+    history = memory.history(user_id)
+
+    # Answer to a pending confirmation
+    pending = memory.pop_pending(user_id)
+    decision = actions.answer(request.text) if pending else None
+    route = "confirmation" if decision else await route_message(request, history)
 
     reply = ""
     try:
-        if route == "off_topic":
-            reply = OFF_TOPIC_REPLY
-            yield events.text(reply)
-        elif route == "ide_action":
-            async for payload in actions.run(planner_llm, precise_llm, request.text, history):
+        if decision == "yes":
+            async for payload in actions.confirm(precise_llm, pending, memory, user_id):
                 reply += payload.get("response", "")
                 yield events.encode(payload)
+        elif decision == "no":
+            reply = CANCELLED_REPLY
+            yield events.text(reply)
         else:
-            messages = [SystemMessage(SYSTEM_PROMPT), *history, HumanMessage(request.text)]
-            async for chunk in llm.astream(messages):
-                if chunk.text:
-                    reply += chunk.text
-                    yield events.text(chunk.text)
+            if pending:
+                reply = PENDING_DROPPED_REPLY
+                yield events.text(reply)
+
+            if route == "off_topic":
+                reply += OFF_TOPIC_REPLY
+                yield events.text(OFF_TOPIC_REPLY)
+            elif route == "ide_action":
+                async for payload in actions.run(
+                    planner_llm, precise_llm, request.text, history, memory, user_id
+                ):
+                    reply += payload.get("response", "")
+                    yield events.encode(payload)
+            else:
+                messages = [SystemMessage(SYSTEM_PROMPT), *history, HumanMessage(request.text)]
+                async for chunk in llm.astream(messages):
+                    if chunk.text:
+                        reply += chunk.text
+                        yield events.text(chunk.text)
     except Exception:
         log.exception("LLM request failed")
         yield events.text("Sorry, I can't reach the language model right now. Please try again.")
     else:
         # Save turn, hiding off-topic text
         user_text = OFF_TOPIC_PLACEHOLDER if route == "off_topic" else request.text
-        memory.add_turn(request.user_id, user_text, reply)
+        memory.add_turn(user_id, user_text, reply)
 
     yield events.done()
 
