@@ -140,6 +140,14 @@ SEVERAL_WORDS = re.compile(r"\b(and|also|then|plus)\b|,", re.I)
 
 REFERENCE_WORDS = re.compile(r"\b(it|its|that|this|them|those|these)\b", re.I)
 
+EDIT_WORDS = re.compile(
+    r"\b(change|set|update|modify|increase|decrease|raise|lower|bump|rename|add|remove|replace"
+    r"|expose|switch|edit|fix)\b",
+    re.I,
+)
+EXISTING_FILE_OPS = ("edit_file", "delete_file", "read_file", "validate_file")
+LOOK_WORDS = re.compile(r"\b(valid|validate|check|show|open|see|inside|contents?|display)\b", re.I)
+
 OUTSIDE_PATH = re.compile(r"(\.\.[/\\])|(^|\s)(/|~/|[A-Za-z]:\\)")
 
 # Planner context size
@@ -201,6 +209,18 @@ def extract_block(text: str) -> str:
 async def plan(
     planner_llm, text: str, history: list[BaseMessage], touched: list[str]
 ) -> list[Step]:
+    planned = await ask_planner(planner_llm, text, history, touched)
+    steps = clean_plan(planned, text, touched)
+
+    # Retry without context
+    if planned and not steps and (history or touched):
+        steps = clean_plan(await ask_planner(planner_llm, text, [], []), text, touched)
+    return steps
+
+
+async def ask_planner(
+    planner_llm, text: str, history: list[BaseMessage], touched: list[str]
+) -> list[Step]:
     context = "\n".join(
         f"{'User' if m.type == 'human' else 'Hyperion'}: {m.content[:300]}"
         for m in history[-CONTEXT_MESSAGES:]
@@ -211,12 +231,24 @@ async def plan(
     if touched:
         prompt = f"Files used recently, newest last: {', '.join(touched)}\n\n{prompt}"
     result = await planner_llm.ainvoke([SystemMessage(PLANNER_PROMPT), HumanMessage(prompt)])
-    steps = result.steps[:MAX_STEPS]
+    return result.steps[:MAX_STEPS]
+
+
+def clean_plan(steps: list[Step], text: str, touched: list[str]) -> list[Step]:
+    steps = [step.model_copy() for step in steps]
 
     # Drop redundant reads
     written = {s.path for s in steps if s.operation in ("create_file", "edit_file")}
     steps = [s for s in steps if not (s.operation == "read_file" and s.path in written)]
-    steps = [s for s in steps if refers_to(s, text)]
+    latest = touched[-1] if touched else None
+    kept = []
+    for step in steps:
+        if refers_to(step, text):
+            kept.append(step)
+        elif latest and implicit_latest(step, text, latest):
+            step.path = latest
+            kept.append(step)
+    steps = kept
 
     # Paths the user typed win
     typed = TYPED_PATH.findall(text)
@@ -227,6 +259,9 @@ async def plan(
         same = [t for t in typed if posixpath.basename(t) == name]
         if same:
             step.path = same[0]
+        elif latest and not typed and step.operation in EXISTING_FILE_OPS and REFERENCE_WORDS.search(text):
+            # "it" means the newest file
+            step.path = latest
 
     # One step unless asked for more
     if not SEVERAL_WORDS.search(text):
@@ -235,6 +270,17 @@ async def plan(
         if step.operation == "create_file" and "." not in posixpath.basename(step.path):
             step.path += ".yaml"
     return steps
+
+
+def implicit_latest(step: Step, text: str, latest: str) -> bool:
+    # Unnamed follow-ups mean the newest file
+    if posixpath.basename(step.path) != posixpath.basename(latest):
+        return False
+    if step.operation == "edit_file":
+        return bool(EDIT_WORDS.search(text))
+    if step.operation in ("read_file", "validate_file"):
+        return bool(LOOK_WORDS.search(text))
+    return False
 
 
 def refers_to(step: Step, text: str) -> bool:
