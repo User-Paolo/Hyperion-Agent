@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 import actions
 import events
+import rag
 import router
 from memory import SessionMemory
 
@@ -30,6 +31,7 @@ llm = ChatOpenAI(
 precise_llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0)
 router_llm = router.build(precise_llm)
 planner_llm = actions.build_planner(precise_llm)
+retriever = rag.Retriever(BASE_URL, API_KEY)
 
 SYSTEM_PROMPT = (
     "You are Hyperion, an AI assistant designed to help deploy and manage applications "
@@ -81,6 +83,15 @@ async def route_message(request: ChatRequest, history) -> router.Route:
     return route
 
 
+async def find_sources(request: ChatRequest, history):
+    try:
+        return await retriever.search(rag.search_query(request.text, history))
+    except Exception:
+        # Answer without documents
+        log.exception("Retrieval failed")
+        return None
+
+
 async def generate_reply(request: ChatRequest):
     user_id = request.user_id
     history = memory.history(user_id)
@@ -113,6 +124,16 @@ async def generate_reply(request: ChatRequest):
                 ):
                     reply += payload.get("response", "")
                     yield events.encode(payload)
+            elif route == "hyperai_question" and (hits := await find_sources(request, history)) is not None:
+                messages = rag.build_messages(SYSTEM_PROMPT, history, request.text, hits)
+                async for chunk in precise_llm.astream(messages):
+                    if chunk.text:
+                        reply += chunk.text
+                        yield events.text(chunk.text)
+                sources = rag.sources_line(hits)
+                if sources:
+                    reply += sources
+                    yield events.text(sources)
             else:
                 messages = [SystemMessage(SYSTEM_PROMPT), *history, HumanMessage(request.text)]
                 async for chunk in llm.astream(messages):
