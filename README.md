@@ -1,5 +1,11 @@
 # Hyperion Agent
 
+[![Docker image](https://img.shields.io/docker/v/paolo189/hyperion?sort=semver&label=docker)](https://hub.docker.com/r/paolo189/hyperion)
+![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)
+![Stack: FastAPI + LangChain](https://img.shields.io/badge/stack-FastAPI%20%2B%20LangChain-009688.svg)
+![Veles Hack 2026](https://img.shields.io/badge/Veles%20Hack-2026-8a2be2.svg)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENCE)
+
 Built by team **Solo Bolo** for Veles Hack 2026, Challenge 1 by HYPER-AI, *Hyperion, an LLM powered agentic assistant*.
 
 Hyperion is the chat assistant of the [HyperAI IDE](https://ide.hyperai.di.uoa.gr/). It answers questions about HYPER-AI from the project's documents, turns plain language requests into IDE actions (create, edit, validate and delete files), remembers the conversation, declines off topic requests and asks before deleting or overwriting anything.
