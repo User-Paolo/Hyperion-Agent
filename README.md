@@ -12,6 +12,8 @@ Hyperion is the chat assistant of the [HyperAI IDE](https://ide.hyperai.di.uoa.g
 
 It is a [FastAPI](https://fastapi.tiangolo.com/) service on **port 8000** with a `POST /chat` endpoint that streams its reply to the IDE as Server Sent Events (SSE). The deliverable is the Docker image **`paolo189/hyperion`** with version tags, where `latest` is always the newest version.
 
+![Demo of a conversation with Hyperion in the HyperAI IDE](docs/demo.gif)
+
 ```
 You        Create a deployment YAML for a service using the nginx Docker image
 Hyperion   Writing `nginx.yaml`...
@@ -125,6 +127,7 @@ Every message goes through these steps.
 | `build_index.py` | Builds `knowledge/index.json` from the documents |
 | `templates/` | Native and device app profile templates, from the IDE cookbook |
 | `knowledge/` | HYPER-AI documents, IDE documentation and the search index |
+| `docs/demo.gif` | Recording of a sample session |
 
 To rebuild the index after changing the documents in `knowledge/`, run `uv run build_index.py` with `API_KEY` set.
 
